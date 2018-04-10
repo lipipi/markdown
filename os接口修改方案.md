@@ -150,12 +150,12 @@ file.m_file == ::open(name,create_flag,os_innodb_umask);
  - os_file_get_status_posix
 
 ```flow
-op1=>operation: os_file_create_simple_func
-op2=>operation: os_file_create_func
-op3=>operation: os_file_create_simple_no_error_hanlding_func
-op4=>operation: os_file_get_status_posix
-op5=>operation: os_file_close_func
-op6=>operation: close
+op1=>operation: row_log_apply_ops
+op2=>operation: row_log_table_apply_ops
+op3=>operation: os_file_set_eof
+op4=>operation: os_file_truncate
+op5=>operation: os_file_truncate_posix
+op6=>operation: ftruncate
 op7=>operation: os_file_get_status
 op8=>operation: open
 op1->op2->op3->op4->op5->op6->op7->op8
@@ -180,6 +180,7 @@ int net_open ( const char * file_name , int create_flag ){
 -----------
 ##<font color="DarkOliveGreen">使用文件id操作相应的文件</font>
 **<font color="Maroon">1.   截断</font>**
+![](https://raw.githubusercontent.com/lipipi/picture/master/ftruncate.png)
 ```
 int ftruncate ( int fd , int );
 
@@ -204,7 +205,7 @@ return res == 0;
  }
 ```
 **<font color="Maroon">2.   刷盘</font>**
-![fsync_picture](https://raw.githubusercontent.com/lipipi/picture/master/fsync.png)
+![](https://raw.githubusercontent.com/lipipi/picture/master/fsync.png)
 **函数堆栈**
 ```
 os_file_flush_func ( os_file_t file )
@@ -225,6 +226,7 @@ int net_fsync( int fd ){
 
 ```
 **<font color="Maroon">3.   关闭</font>**
+![](https://raw.githubusercontent.com/lipipi/picture/master/open%26close.png)
 **函数堆栈**
 ```
 os_file_close_func ( os_file_t file )//涉及到错误信息收集
@@ -288,7 +290,9 @@ os_file_io(os_file_t file,const IORequest & in_type)
     os_file_io_complete
 ```
 **修改方案**
-**<font color="Maroon">其他系统调用都类似</font>**
+默认都返回DB_IO_NO_PUNCH_HOLE，所以不用修改
+
+
 **<font color="red">
 大多数都是将系统调用层给替换掉
 除了两处
@@ -364,12 +368,32 @@ int net_fcntl_file_set_nocache(int fd){
 ```
 
 **<font color="red">
+存储层
 相同的系统调用
 相同的一套os_file_t
 os_offset_t
 os_innodb_umask
 dberr_t
 </font>**
+
+---------
+##总结
+数据文件和日志文件都是通过表空间来访问
+1.  space_id得到对应的fil_space对象
+2.  fil_space对象的fil_node的属性保存了文件的相关信息，fil_node->handler缓存了打开的ibd文件的句柄（fil_node_open_file)，但是fil_node有时候是通过Datafile工具类来访问ibd文件的(fil_ibd_open第一次打开一个表空间，构建fil_space对象的时候）
+3.  将pfs_os_file_t对象缓存在fil_node->handler或者datafile->m_handler中了
+4.  只有在打开的时候，使用文件名访问文件，其他时候都是直接通过文件句柄调用上文列出来的os函数
+5.  datafile有时候会直接取出m_handler.m_file文件句柄对象，直接系统调用
+```
+void Datafile::init_file_info(){
+    fstat(m_handler.m_file,&m_file_info);
+}
+```
+<font color="red">
+数据文件和日志文件只通过以上的os函数，在其他模块可能直接通过系统调用访问
+其他一些文件同样的创建方法，但是使用文件名访问，就要修改其他的一些os函数了
+</font>
+
 
 ------------------------
 ##<font color="SlateBlue">使用文件名访问</font>
@@ -461,7 +485,7 @@ os_file_rename_func(const char * oldpath,const char * newpath)
 ```
 os_file_create_tmpfile(const char * path)
     int fd = innobase_mysql_tmpfile(path)
-    fdopem(fd,"w+b")
+    fdopen(fd,"w+b")
 ```
 
 

@@ -56,3 +56,93 @@ struct Slot{
 
 <font color="blue">根据读写文件的偏移量来划分给各个线程（相同类型）</font>
 这个线程的io任务太多了，32个slot放不下了，就将任务按序交给下一个线程
+
+-----------------
+##IO线程
+默认一个ibuf，一个log，四个read，四个write线程
+每个线程分配一个全局的segment号，从0开始，依次递增1
+等待在各自的segment号上
+```
+//fil0fil.cc
+fil_aio_wait(segment)
+    //os0file.cc
+    os_aio_handler(segment,&fil_node,&message,&type)
+        os_aio_simulated_handler(segment,&fil_node,&message,&type)
+            1.首先根据全局的segment找到是哪一个AIO和对应的local_segment
+            2.SimulatedAIOHandler handler对象，检查该segment对应的32个slot中，找到一个io完成了的slot
+            3.AIO将该slot释放掉
+    fil_node_complete_io
+    buf_page_io_complete
+    log_io_complete
+    
+```
+>需要存储到存储层的文件
+>都是通过os函数来访问
+>不是所有文件都是通过os函数来访问的
+>不需要存储到存储层，由mysql创建的临时文件，也调用了os函数
+>os函数如何区分该文件是本地的，还是远程的
+>不能区分的话，复制一套net_os
+>net_os和os函数基本一致，只是将里面的系统调用替换为网络交互
+>然后找出所有的远程文件，将访问这些文件的os函数用net_os函数替换掉
+
+消息格式
+```
+struct param{
+    int param_type,
+    int param_len,
+    char value[param_len]
+}
+struct request{
+    int type,
+    int param_num,
+    param params[param_num],
+    int return_num,
+    int return_types[return_num]
+}
+struct response{
+    int return_num,
+    param returns[return_num]
+}
+```
+数据文件和日志文件
+pfs_os_file fil_node->handler
+pfs_os_file datafile->m_handler
+都是通过文件句柄来访问的
+但是其他文件比如truncate log file和undo log file没有缓存pfs_os_file
+都是通过文件名来访问的
+
+##计算层和存储层交互
+使用socket通信
+计算层：
+异步io任务，由io线程在执行
+同步io任务，由用户线程执行
+```
+class SocketPool{
+static{
+    WSADATA wsd;
+    if(WSAStartup(MAKEWORD(2，2),&wsd) != 0){
+        ib:error()<<"WSAStartup failed!";
+    }
+}
+public:
+    static SocketPool * getInstance();
+    SOCKET getSocket(bool = false);
+    void returnSocket(SOCKET socket);
+    ~SocketPool();
+private:
+    SocketPool(const char * addr,short port,int size):size(size):n_reserved(size){
+        servAddr.sin_family = AF_INET;
+        servAddr.sin_addr.s_addr = inet_addr(addr);
+        servAddr.sin_port = htons(port);
+        sockets = new sockets[size];
+        for(int i = 0;i<size;i++){
+            sockets[i] = socket(AF_INET,SOCKET_STRAM,IPPROTO_TCP);
+        }
+    }
+public:
+private:
+    int size;
+    SOCKET * sockets;
+    SOCKADDR_IN servAddr;
+    int n_reserved;
+```
